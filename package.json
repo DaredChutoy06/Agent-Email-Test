@@ -1,0 +1,24 @@
+{
+  "name": "email-scanner-agent",
+  "version": "1.0.0",
+  "description": "iCloud email scanner with AI-powered sub-agent for pattern analysis",
+  "main": "dist/index.js",
+  "scripts": {
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "build": "tsc",
+    "scan": "ts-node src/emailScanner.ts",
+    "analyze": "ts-node src/subAgent.ts"
+  },
+  "dependencies": {
+    "dotenv": "^16.3.1",
+    "imap": "^0.8.19",
+    "mailparser": "^3.6.4",
+    "@anthropic-ai/sdk": "^0.20.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0",
+    "ts-node": "^10.9.1"
+  }
+}
