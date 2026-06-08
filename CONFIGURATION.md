@@ -6,8 +6,8 @@
 # .env
 
 # iCloud Credentials (required)
-ICLOUD_EMAIL=yourname@icloud.com
-ICLOUD_PASSWORD=abcd-efgh-ijkl-mnop
+ICLOUD_EMAIL=
+ICLOUD_PASSWORD=
 
 # Anthropic API Key (required)
 ANTHROPIC_API_KEY=sk-ant-v0-abc123def456...

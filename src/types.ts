@@ -9,6 +9,8 @@ export interface Email {
   isRead: boolean;
   timestamp: number;
   folder: string;
+  uid?: number;
+  messageId?: string;
   sender?: {
     name: string;
     email: string;
@@ -38,6 +40,7 @@ export interface SubAgentAnalysis {
     delete: string[];
     unsubscribe: string[];
     review: string[];
+    keep: string[];
   };
   summary: string;
 }
@@ -51,5 +54,23 @@ export interface iCloudConfig {
 // Email storage structure
 export interface EmailStorage {
   lastScan: Date;
+  lastUid?: number;
+  readStateVersion?: number;
   emails: Email[];
+}
+
+export interface SenderRecord {
+  email: string;
+  name: string;
+  totalEmails: number;
+  unreadCount: number;
+  readCount: number;
+  firstEmailDate: Date;
+  lastEmailDate: Date;
+  lastSeen: Date;
+}
+
+export interface SenderDatabase {
+  lastUpdated: Date;
+  senders: SenderRecord[];
 }

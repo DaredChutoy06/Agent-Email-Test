@@ -1,10 +1,13 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { Email, EmailAnalysis, SubAgentAnalysis } from './types';
 
+type Recommendation = EmailAnalysis['recommendation'];
+
 export class EmailAnalysisAgent {
   private client: Anthropic;
   private model = process.env.ANTHROPIC_MODEL?.trim() || 'claude-sonnet-4-6';
   private fallbackModels = ['claude-haiku-4-5-20251001'];
+  private analysisBatchSize = parseInt(process.env.ANALYSIS_BATCH_SIZE || '20', 10);
   
   constructor(apiKey: string) {
     this.client = new Anthropic({
@@ -31,13 +34,8 @@ export class EmailAnalysisAgent {
       readRate: (emailList.filter(e => e.isRead).length / emailList.length) * 100
     }));
 
-    // Send to Claude for analysis
-    const prompt = this.buildAnalysisPrompt(analysisData);
-    
     try {
-      const message = await this.callAnthropic(prompt);
-      const responseText = message.content[0].type === 'text' ? message.content[0].text : '';
-      const parsedAnalysis = this.parseAnalysisResponse(responseText, analysisData);
+      const parsedAnalysis = await this.analyzeSenderBatches(analysisData);
 
       return {
         analyses: parsedAnalysis,
@@ -52,6 +50,23 @@ export class EmailAnalysisAgent {
     }
   }
 
+  private async analyzeSenderBatches(analysisData: any[]): Promise<EmailAnalysis[]> {
+    const batchSize = Number.isFinite(this.analysisBatchSize) && this.analysisBatchSize > 0
+      ? this.analysisBatchSize
+      : 20;
+    const analyses: EmailAnalysis[] = [];
+
+    for (let i = 0; i < analysisData.length; i += batchSize) {
+      const batch = analysisData.slice(i, i + batchSize);
+      const prompt = this.buildAnalysisPrompt(batch);
+      const message = await this.callAnthropic(prompt);
+      const responseText = message.content[0].type === 'text' ? message.content[0].text : '';
+      analyses.push(...this.parseAnalysisResponse(responseText, batch));
+    }
+
+    return analyses;
+  }
+
   private async callAnthropic(prompt: string) {
     let lastError: any = null;
 
@@ -64,7 +79,7 @@ export class EmailAnalysisAgent {
         console.log(`[DEBUG] Trying Anthropic model: ${model}`);
         const message = await this.client.messages.create({
           model,
-          max_tokens: 2048,
+          max_tokens: 4096,
           messages: [
             {
               role: 'user',
@@ -114,7 +129,7 @@ export class EmailAnalysisAgent {
   private calculateAverageFrequency(emails: Email[]): number {
     if (emails.length <= 1) return 0;
 
-    const sortedEmails = emails.sort((a, b) => a.timestamp - b.timestamp);
+    const sortedEmails = [...emails].sort((a, b) => a.timestamp - b.timestamp);
     let totalDays = 0;
     
     for (let i = 1; i < sortedEmails.length; i++) {
@@ -133,6 +148,8 @@ export class EmailAnalysisAgent {
 
 Email Sender Analysis:
 ${JSON.stringify(analysisData, null, 2)}
+
+There are ${analysisData.length} senders in this batch. Return exactly ${analysisData.length} analyses, one for every sender in the input.
 
 For each sender, provide a JSON response in this exact format:
 {
@@ -153,7 +170,7 @@ Consider these factors when making recommendations:
 4. Content patterns: Repetitive subject lines = likely spam/newsletter
 5. Engagement: If user reads emails regularly, recommend "keep"
 
-Provide ONLY valid JSON, no other text.`;
+Provide ONLY valid JSON, no other text. Do not omit any sender.`;
   }
 
   /**
@@ -168,23 +185,56 @@ Provide ONLY valid JSON, no other text.`;
       }
 
       const parsed = JSON.parse(jsonMatch[0]);
-      
-      return parsed.analyses.map((analysis: any) => ({
-        sender: analysis.sender,
-        totalEmails: senderData.find((sd: any) => sd.sender === analysis.sender)?.totalEmails || 0,
-        unreadCount: senderData.find((sd: any) => sd.sender === analysis.sender)?.unreadCount || 0,
-        lastEmailDate: senderData.find((sd: any) => sd.sender === analysis.sender)?.lastEmailDate || new Date(),
-        isRepetitive: analysis.recommendation === 'unsubscribe' || analysis.recommendation === 'delete',
-        averageDaysFrequency: senderData.find((sd: any) => sd.sender === analysis.sender)?.averageDaysFrequency || 0,
-        readRate: senderData.find((sd: any) => sd.sender === analysis.sender)?.readRate || 0,
-        recommendation: analysis.recommendation,
-        confidence: analysis.confidence,
-        reason: analysis.reason
-      }));
+      const analyses = Array.isArray(parsed.analyses) ? parsed.analyses : [];
+      const senderMap = new Map(senderData.map((sender: any) => [sender.sender, sender]));
+      const parsedBySender = new Map<string, EmailAnalysis>();
+
+      analyses.forEach((analysis: any) => {
+        const sender = typeof analysis.sender === 'string' ? analysis.sender : '';
+        const senderDatum = senderMap.get(sender);
+        if (!senderDatum || parsedBySender.has(sender)) {
+          return;
+        }
+
+        const recommendation = this.normalizeRecommendation(analysis.recommendation);
+        const confidence = typeof analysis.confidence === 'number'
+          ? Math.min(1, Math.max(0, analysis.confidence))
+          : 0.5;
+
+        parsedBySender.set(sender, {
+          sender,
+          totalEmails: senderDatum.totalEmails,
+          unreadCount: senderDatum.unreadCount,
+          lastEmailDate: senderDatum.lastEmailDate,
+          isRepetitive: recommendation === 'unsubscribe' || recommendation === 'delete',
+          averageDaysFrequency: senderDatum.averageDaysFrequency,
+          readRate: senderDatum.readRate,
+          recommendation,
+          confidence,
+          reason: typeof analysis.reason === 'string' && analysis.reason.trim().length > 0
+            ? analysis.reason
+            : 'No reason provided by AI analysis'
+        });
+      });
+
+      const missingSenders = senderData.filter((sender: any) => !parsedBySender.has(sender.sender));
+      if (missingSenders.length > 0) {
+        console.warn(`[WARN] AI response omitted ${missingSenders.length} sender(s); using fallback analysis for them`);
+        this.generateFallbackAnalysis(missingSenders).forEach(analysis => {
+          parsedBySender.set(analysis.sender, analysis);
+        });
+      }
+
+      return senderData.map((sender: any) => parsedBySender.get(sender.sender)!);
     } catch (error) {
       console.error('Error parsing response:', error);
       return this.generateFallbackAnalysis(senderData);
     }
+  }
+
+  private normalizeRecommendation(value: any): Recommendation {
+    const validRecommendations: Recommendation[] = ['keep', 'delete', 'unsubscribe', 'review'];
+    return validRecommendations.includes(value) ? value : 'review';
   }
 
   /**
@@ -233,7 +283,8 @@ Provide ONLY valid JSON, no other text.`;
     return {
       delete: analyses.filter(a => a.recommendation === 'delete').map(a => a.sender),
       unsubscribe: analyses.filter(a => a.recommendation === 'unsubscribe').map(a => a.sender),
-      review: analyses.filter(a => a.recommendation === 'review').map(a => a.sender)
+      review: analyses.filter(a => a.recommendation === 'review').map(a => a.sender),
+      keep: analyses.filter(a => a.recommendation === 'keep').map(a => a.sender)
     };
   }
 
@@ -244,7 +295,8 @@ Provide ONLY valid JSON, no other text.`;
     const deleteCount = analyses.filter(a => a.recommendation === 'delete').length;
     const unsubscribeCount = analyses.filter(a => a.recommendation === 'unsubscribe').length;
     const reviewCount = analyses.filter(a => a.recommendation === 'review').length;
+    const keepCount = analyses.filter(a => a.recommendation === 'keep').length;
 
-    return `Email Analysis Summary: ${deleteCount} senders recommended for deletion, ${unsubscribeCount} for unsubscription, ${reviewCount} for review.`;
+    return `Email Analysis Summary: ${deleteCount} senders recommended for deletion, ${unsubscribeCount} for unsubscription, ${reviewCount} for review, ${keepCount} to keep.`;
   }
 }

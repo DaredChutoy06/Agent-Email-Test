@@ -8,6 +8,7 @@ export class EmailScanner {
   private imap: Imap;
   private config: iCloudConfig;
   private storagePath: string;
+  private readStateVersion = 2;
 
   constructor(config: iCloudConfig, storagePath: string = './data/emails.json') {
     this.config = config;
@@ -86,24 +87,27 @@ export class EmailScanner {
     });
   }
 
-  async scanEmails(limit: number = 100): Promise<Email[]> {
+  async scanEmails(limit: number = 100, since?: Date, sinceUid?: number): Promise<Email[]> {
     return new Promise((resolve, reject) => {
       const emails: Email[] = [];
-      
-      this.imap.search(['ALL'], (err: any, results: any) => {
-        if (err) {
-          reject(new Error(`Search failed: ${err.message}`));
-          return;
-        }
+      const searchCriteria: any[] = sinceUid
+        ? [['UID', `${sinceUid + 1}:*`]]
+        : since
+          ? [['SINCE', since]]
+          : ['ALL'];
 
+      console.log('[DEBUG] IMAP primary search criteria:', searchCriteria);
+
+      const fetchResults = (results: any[]) => {
         if (!results || results.length === 0) {
           resolve([]);
           return;
         }
 
-        const idsToFetch = results.slice(Math.max(0, results.length - limit));
+        const idsToFetch = since || limit <= 0 ? results : results.slice(Math.max(0, results.length - limit));
+        console.log(`[DEBUG] IMAP search returned ${results.length} results, fetching ${idsToFetch.length} messages`);
         const f = this.imap.fetch(idsToFetch, { bodies: [''] });
-        
+
         f.on('message', (msg: any, seqno: any) => {
           let messageBuffer = '';
           let attributes: any = null;
@@ -128,9 +132,11 @@ export class EmailScanner {
                 subject: parsed.subject || '(No Subject)',
                 date: parsed.date || new Date(),
                 body: parsed.text || parsed.html || '',
-                isRead: !(attributes?.flags || []).includes('\\Seen'),
+                isRead: (attributes?.flags || []).includes('\\Seen'),
                 timestamp: Date.now(),
                 folder: 'INBOX',
+                uid: attributes?.uid,
+                messageId: parsed.messageId || undefined,
                 sender: this.parseSender(parsed.from?.text || '')
               };
 
@@ -145,6 +151,27 @@ export class EmailScanner {
         f.once('end', () => {
           resolve(emails);
         });
+      };
+
+      this.imap.search(searchCriteria, (err: any, results: any) => {
+        if (err) {
+          reject(new Error(`Search failed: ${err.message}`));
+          return;
+        }
+
+        if ((!results || results.length === 0) && sinceUid && since) {
+          console.log('[DEBUG] UID search returned no results; falling back to SINCE search');
+          this.imap.search([['SINCE', since]], (err2: any, fallbackResults: any) => {
+            if (err2) {
+              reject(new Error(`Fallback search failed: ${err2.message}`));
+              return;
+            }
+            fetchResults(fallbackResults);
+          });
+          return;
+        }
+
+        fetchResults(results);
       });
     });
   }
@@ -157,17 +184,42 @@ export class EmailScanner {
     return { name, email };
   }
 
-  async loadStoredEmails(): Promise<Email[]> {
+  private formatImapDate(date: Date): string {
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    return `${date.getDate()}-${months[date.getMonth()]}-${date.getFullYear()}`;
+  }
+
+  async loadStoredData(): Promise<EmailStorage> {
     try {
       if (fs.existsSync(this.storagePath)) {
         const data = fs.readFileSync(this.storagePath, 'utf-8');
         const storage: EmailStorage = JSON.parse(data);
-        return storage.emails;
+        const shouldMigrateReadState = storage.readStateVersion !== this.readStateVersion;
+        if (shouldMigrateReadState) {
+          console.warn('[WARN] Migrating stored email read states from legacy inverted format');
+        }
+        const emails = storage.emails.map(email => ({
+          ...email,
+          date: new Date(email.date),
+          isRead: shouldMigrateReadState ? !email.isRead : email.isRead
+        }));
+        const lastUid = storage.lastUid ?? emails.reduce((max, email) => Math.max(max, email.uid ?? 0), 0);
+        console.log('[DEBUG] Loaded stored lastUid:', lastUid, 'from', storage.lastUid ? 'storage.lastUid' : 'computed emails');
+
+        return {
+          lastScan: new Date(storage.lastScan),
+          lastUid,
+          emails
+        };
       }
     } catch (error) {
       console.error('Error loading stored emails:', error);
     }
-    return [];
+    return {
+      lastScan: new Date(0),
+      lastUid: 0,
+      emails: []
+    };
   }
 
   async saveEmails(emails: Email[]): Promise<void> {
@@ -177,8 +229,12 @@ export class EmailScanner {
         fs.mkdirSync(dir, { recursive: true });
       }
 
+      const lastUid = emails.reduce((max, email) => Math.max(max, email.uid ?? 0), 0);
+      console.log('[DEBUG] Saving lastUid:', lastUid);
       const storage: EmailStorage = {
         lastScan: new Date(),
+        lastUid,
+        readStateVersion: this.readStateVersion,
         emails
       };
 
