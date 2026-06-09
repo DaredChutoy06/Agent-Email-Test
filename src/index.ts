@@ -7,6 +7,9 @@ dotenv.config({ path: cwdEnv });
 
 import { EmailScanner } from './emailScanner';
 import { EmailAnalysisAgent } from './subAgent';
+import { UnsubscribeAgent } from './unsubscribeAgent';
+import { promptUnsubscribeSelection, confirmPrompt } from './interactive';
+import { printUnsubscribeResult } from './unsubscribe';
 import { color, formatDateTime, formatPercent, printKeyValues, printSection, printTable, printTitle } from './terminal';
 import { loadConfig, Logger } from './utils';
 import { Email, EmailAnalysis, SenderDatabase, SubAgentAnalysis } from './types';
@@ -104,6 +107,9 @@ async function main() {
 
       // Save analysis report
       saveAnalysisReport(analysis, config);
+
+      // Interactive unsubscribe prompt (TTY only)
+      await runInteractiveUnsubscribe(analysis, config.scanning.emailStoragePath);
 
     } catch (error) {
       logger.error('Error during email scanning', error);
@@ -320,6 +326,56 @@ function saveAnalysisReport(analysis: any, config: any) {
   } catch (error) {
     console.error('Error saving report:', error);
   }
+}
+
+async function runInteractiveUnsubscribe(analysis: SubAgentAnalysis, storagePath: string) {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) return;
+
+  const unsubscribeSenders = getAnalysesForSenders(analysis, analysis.recommendedActions.unsubscribe);
+  const reviewSenders = getAnalysesForSenders(analysis, analysis.recommendedActions.review);
+
+  if (unsubscribeSenders.length === 0 && reviewSenders.length === 0) return;
+
+  const selection = await promptUnsubscribeSelection(unsubscribeSenders, reviewSenders);
+
+  if (selection.cancelled || selection.senders.length === 0) {
+    console.log(color('\nSkipping unsubscription.', 'gray'));
+    return;
+  }
+
+  const agent = new UnsubscribeAgent();
+
+  // Dry run first so user can see what will happen
+  const dryResult = await agent.run({
+    storagePath,
+    execute: false,
+    logDryRun: false,
+    selectedSenders: selection.senders
+  });
+
+  printUnsubscribeResult(dryResult);
+
+  const executableCount = dryResult.results.filter(r => r.status === 'dry_run').length;
+  if (executableCount === 0) {
+    console.log(color('\nNo one-click unsubscriptions available. Manual review needed for the rest.', 'yellow'));
+    return;
+  }
+
+  const confirmed = await confirmPrompt(
+    `Execute ${executableCount} one-click unsubscription${executableCount !== 1 ? 's' : ''}?`
+  );
+
+  if (!confirmed) return;
+
+  const liveResult = await agent.run({
+    storagePath,
+    logPath: './data/unsubscribe-log.json',
+    execute: true,
+    logDryRun: true,
+    selectedSenders: selection.senders
+  });
+
+  printUnsubscribeResult(liveResult);
 }
 
 // Run the main function

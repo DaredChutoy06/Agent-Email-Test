@@ -55,7 +55,7 @@ async function main() {
       return;
     }
 
-    printResult(result);
+    printUnsubscribeResult(result);
   } catch (error: any) {
     console.error(`[ERROR] ${error?.message || error}`);
     printUsage();
@@ -145,7 +145,7 @@ function requireValue(flag: string, value: string | undefined): string {
   return value;
 }
 
-function printResult(result: UnsubscribeRunResult): void {
+export function printUnsubscribeResult(result: UnsubscribeRunResult): void {
   const counts = countStatuses(result.results);
 
   printTitle(
@@ -231,4 +231,6 @@ Safe defaults:
 `);
 }
 
-main();
+if (require.main === module) {
+  main();
+}
