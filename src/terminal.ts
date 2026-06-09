@@ -137,6 +137,35 @@ export function statusColor(status: string): ColorName {
   }
 }
 
+export function printBar(label: string, done: number, total: number, suffix = ''): void {
+  const BAR_WIDTH = 28;
+  const ratio = total > 0 ? Math.min(done / total, 1) : 0;
+  const filled = Math.round(ratio * BAR_WIDTH);
+  const bar = '█'.repeat(filled) + '░'.repeat(BAR_WIDTH - filled);
+  const width = String(total).length;
+  const doneStr = String(done).padStart(width);
+  const line = `${label}  [${color(bar, 'cyan')}]  ${doneStr} / ${total}${suffix ? '  ' + color(suffix, 'dim') : ''}`;
+  console.log(line);
+}
+
+export function printProgress(label: string, done: number, total: number, suffix = ''): void {
+  if (!process.stdout.isTTY) return;
+
+  const BAR_WIDTH = 28;
+  const ratio = total > 0 ? Math.min(done / total, 1) : 0;
+  const filled = Math.round(ratio * BAR_WIDTH);
+  const bar = '█'.repeat(filled) + '░'.repeat(BAR_WIDTH - filled);
+  const width = String(total).length;
+  const doneStr = String(done).padStart(width);
+  const line = `${label}  [${color(bar, 'cyan')}]  ${doneStr} / ${total}${suffix ? '  ' + color(suffix, 'dim') : ''}`;
+
+  process.stdout.write(`\r\x1B[K${line}`);
+
+  if (done >= total) {
+    process.stdout.write('\n');
+  }
+}
+
 function toCell(value: string | number | undefined): string {
   if (value === undefined) return '';
   return String(value).replace(/\s+/g, ' ').trim();

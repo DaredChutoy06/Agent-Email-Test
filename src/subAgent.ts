@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { Email, EmailAnalysis, SubAgentAnalysis } from './types';
+import { printProgress } from './terminal';
 
 type Recommendation = EmailAnalysis['recommendation'];
 
@@ -55,13 +56,19 @@ export class EmailAnalysisAgent {
       ? this.analysisBatchSize
       : 20;
     const analyses: EmailAnalysis[] = [];
+    const totalBatches = Math.ceil(analysisData.length / batchSize);
+
+    printProgress('Analyzing senders', 0, analysisData.length, `batch 0 / ${totalBatches}`);
 
     for (let i = 0; i < analysisData.length; i += batchSize) {
       const batch = analysisData.slice(i, i + batchSize);
+      const batchNum = Math.floor(i / batchSize) + 1;
+      printProgress('Analyzing senders', i, analysisData.length, `batch ${batchNum} / ${totalBatches}`);
       const prompt = this.buildAnalysisPrompt(batch);
       const message = await this.callAnthropic(prompt);
       const responseText = message.content[0].type === 'text' ? message.content[0].text : '';
       analyses.push(...this.parseAnalysisResponse(responseText, batch));
+      printProgress('Analyzing senders', i + batch.length, analysisData.length, `batch ${batchNum} / ${totalBatches}`);
     }
 
     return analyses;
@@ -70,13 +77,8 @@ export class EmailAnalysisAgent {
   private async callAnthropic(prompt: string) {
     let lastError: any = null;
 
-    console.log(`[DEBUG] Env ANTHROPIC_MODEL=${process.env.ANTHROPIC_MODEL}`);
-    console.log(`[DEBUG] Resolved model=${this.model}`);
-    console.log(`[DEBUG] Fallback models=${JSON.stringify(this.fallbackModels)}`);
-
     for (const model of [this.model, ...this.fallbackModels]) {
       try {
-        console.log(`[DEBUG] Trying Anthropic model: ${model}`);
         const message = await this.client.messages.create({
           model,
           max_tokens: 4096,

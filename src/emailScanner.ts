@@ -9,6 +9,9 @@ export class EmailScanner {
   private config: iCloudConfig;
   private storagePath: string;
   private readStateVersion = 2;
+  private totalInboxCount = 0;
+
+  getTotalInboxCount(): number { return this.totalInboxCount; }
 
   constructor(config: iCloudConfig, storagePath: string = './data/emails.json') {
     this.config = config;
@@ -53,6 +56,7 @@ export class EmailScanner {
 
           if (!isResolved) {
             isResolved = true;
+            this.totalInboxCount = box?.messages?.total ?? 0;
             console.log('[DEBUG] Successfully opened INBOX');
             resolve();
           }
@@ -87,7 +91,7 @@ export class EmailScanner {
     });
   }
 
-  async scanEmails(limit: number = 100, since?: Date, sinceUid?: number): Promise<Email[]> {
+  async scanEmails(limit: number = 100, since?: Date, sinceUid?: number, onProgress?: (done: number, total: number) => void): Promise<Email[]> {
     return new Promise((resolve, reject) => {
       const emails: Email[] = [];
       const searchCriteria: any[] = sinceUid
@@ -106,6 +110,7 @@ export class EmailScanner {
 
         const idsToFetch = since || limit <= 0 ? results : results.slice(Math.max(0, results.length - limit));
         console.log(`[DEBUG] IMAP search returned ${results.length} results, fetching ${idsToFetch.length} messages`);
+        if (onProgress) onProgress(0, idsToFetch.length);
         const f = this.imap.fetch(idsToFetch, { bodies: [''] });
 
         f.on('message', (msg: any, seqno: any) => {
@@ -142,6 +147,7 @@ export class EmailScanner {
               };
 
               emails.push(email);
+              if (onProgress) onProgress(emails.length, idsToFetch.length);
             } catch (error) {
               console.error('Parse error:', error);
             }

@@ -10,7 +10,7 @@ import { EmailAnalysisAgent } from './subAgent';
 import { UnsubscribeAgent } from './unsubscribeAgent';
 import { promptUnsubscribeSelection, confirmPrompt } from './interactive';
 import { printUnsubscribeResult } from './unsubscribe';
-import { color, formatDateTime, formatPercent, printKeyValues, printSection, printTable, printTitle } from './terminal';
+import { color, formatDateTime, formatPercent, printBar, printKeyValues, printProgress, printSection, printTable, printTitle } from './terminal';
 import { loadConfig, Logger } from './utils';
 import { Email, EmailAnalysis, SenderDatabase, SubAgentAnalysis } from './types';
 import fs from 'fs';
@@ -18,6 +18,7 @@ import fs from 'fs';
 interface CliOptions {
   scanMoreLimit?: number;
   newScanLimit: number;
+  analyzeLimit?: number;
 }
 
 async function main() {
@@ -51,7 +52,12 @@ async function main() {
 
       // Scan only new emails since the last scan using UID tracking
       logger.info('Scanning inbox for new emails...');
-      const newEmails = await scanner.scanEmails(cliOptions.newScanLimit, storedData.lastScan, storedData.lastUid);
+      const newEmails = await scanner.scanEmails(
+        cliOptions.newScanLimit,
+        storedData.lastScan,
+        storedData.lastUid,
+        (done, total) => printProgress('Fetching emails', done, total)
+      );
       logger.info(`Found ${newEmails.length} new emails since last scan`);
       if (newEmails.length > 0) {
         logger.info('New email UIDs:', newEmails.map(email => email.uid));
@@ -64,13 +70,31 @@ async function main() {
       if (cliOptions.scanMoreLimit) {
         const beforeScanMoreCount = allEmails.length;
         logger.info(`Scanning the most recent ${cliOptions.scanMoreLimit} inbox emails for more history...`);
-        const moreEmails = await scanner.scanEmails(cliOptions.scanMoreLimit);
+        const moreEmails = await scanner.scanEmails(
+          cliOptions.scanMoreLimit,
+          undefined,
+          undefined,
+          (done, total) => printProgress('Fetching emails', done, total)
+        );
         allEmails = mergeEmails(allEmails, moreEmails);
         logger.info('Additional scan complete', {
           fetched: moreEmails.length,
           addedUnique: allEmails.length - beforeScanMoreCount,
           totalUnique: allEmails.length
         });
+      }
+
+      if (cliOptions.analyzeLimit && allEmails.length < cliOptions.analyzeLimit) {
+        const beforeCount = allEmails.length;
+        logger.info(`Backfilling to reach --analyze target of ${cliOptions.analyzeLimit} emails...`);
+        const moreEmails = await scanner.scanEmails(
+          cliOptions.analyzeLimit,
+          undefined,
+          undefined,
+          (done, total) => printProgress('Fetching emails', done, total)
+        );
+        allEmails = mergeEmails(allEmails, moreEmails);
+        logger.info(`Backfill complete, added ${allEmails.length - beforeCount} unique emails`);
       }
 
       logger.info(`Total unique emails: ${allEmails.length}`);
@@ -82,8 +106,20 @@ async function main() {
       await saveSenderDatabase(allEmails);
 
       // Close IMAP connection
+      const totalInboxCount = scanner.getTotalInboxCount();
       await scanner.close();
       logger.info('Closed iCloud connection');
+
+      const emailsToAnalyze = cliOptions.analyzeLimit
+        ? allEmails.slice(0, cliOptions.analyzeLimit)
+        : allEmails;
+
+      if (totalInboxCount > 0) {
+        const coverageHint = allEmails.length < totalInboxCount
+          ? `run with --analyze ${Math.min(totalInboxCount, allEmails.length + 500)} to expand`
+          : '';
+        printBar('Inbox coverage', emailsToAnalyze.length, totalInboxCount, coverageHint || 'emails analyzed');
+      }
 
       // Initialize analysis agent
       logger.info('Initializing AI analysis agent...');
@@ -91,7 +127,7 @@ async function main() {
 
       // Analyze emails
       logger.info('Analyzing email patterns with AI...');
-      const analysis = await analysisAgent.analyzeEmails(allEmails);
+      const analysis = await analysisAgent.analyzeEmails(emailsToAnalyze);
 
       logger.info('Analysis complete', {
         totalEmailsScanned: analysis.totalEmailsScanned,
@@ -137,6 +173,10 @@ function parseArgs(args: string[]): CliOptions {
         options.scanMoreLimit = parsePositiveInteger(arg, next);
         i++;
         break;
+      case '--analyze':
+        options.analyzeLimit = parsePositiveInteger(arg, next);
+        i++;
+        break;
       case '--new-limit':
         options.newScanLimit = parsePositiveInteger(arg, next);
         i++;
@@ -170,10 +210,11 @@ function printUsage(): void {
   console.log(`
 Usage:
   npm run dev
-  npm run dev -- --scan-more 500
+  npm run dev -- --analyze 500
   npm run dev -- --backfill 1000
 
 Options:
+  --analyze <count>    Fetch and analyze the most recent count emails. Backfills if needed.
   --scan-more <count>  Scan the most recent count inbox emails and merge any new history.
   --backfill <count>   Alias for --scan-more.
   --new-limit <count>  Limit for the normal new-mail scan. Default: 100.
