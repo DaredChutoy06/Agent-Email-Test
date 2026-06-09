@@ -7,12 +7,19 @@ dotenv.config({ path: cwdEnv });
 
 import { EmailScanner } from './emailScanner';
 import { EmailAnalysisAgent } from './subAgent';
+import { color, formatDateTime, formatPercent, printKeyValues, printSection, printTable, printTitle } from './terminal';
 import { loadConfig, Logger } from './utils';
-import { Email, SenderDatabase } from './types';
+import { Email, EmailAnalysis, SenderDatabase, SubAgentAnalysis } from './types';
 import fs from 'fs';
+
+interface CliOptions {
+  scanMoreLimit?: number;
+  newScanLimit: number;
+}
 
 async function main() {
   try {
+    const cliOptions = parseArgs(process.argv.slice(2));
     const config = loadConfig();
     const logger = new Logger(config.logging.level);
 
@@ -41,7 +48,7 @@ async function main() {
 
       // Scan only new emails since the last scan using UID tracking
       logger.info('Scanning inbox for new emails...');
-      const newEmails = await scanner.scanEmails(100, storedData.lastScan, storedData.lastUid);
+      const newEmails = await scanner.scanEmails(cliOptions.newScanLimit, storedData.lastScan, storedData.lastUid);
       logger.info(`Found ${newEmails.length} new emails since last scan`);
       if (newEmails.length > 0) {
         logger.info('New email UIDs:', newEmails.map(email => email.uid));
@@ -49,7 +56,20 @@ async function main() {
       }
 
       // Merge and deduplicate emails, preserving read state
-      const allEmails = mergeEmails(storedData.emails, newEmails);
+      let allEmails = mergeEmails(storedData.emails, newEmails);
+
+      if (cliOptions.scanMoreLimit) {
+        const beforeScanMoreCount = allEmails.length;
+        logger.info(`Scanning the most recent ${cliOptions.scanMoreLimit} inbox emails for more history...`);
+        const moreEmails = await scanner.scanEmails(cliOptions.scanMoreLimit);
+        allEmails = mergeEmails(allEmails, moreEmails);
+        logger.info('Additional scan complete', {
+          fetched: moreEmails.length,
+          addedUnique: allEmails.length - beforeScanMoreCount,
+          totalUnique: allEmails.length
+        });
+      }
+
       logger.info(`Total unique emails: ${allEmails.length}`);
 
       // Save combined emails
@@ -80,7 +100,7 @@ async function main() {
       });
 
       // Display results
-      displayResults(analysis, logger);
+      displayResults(analysis);
 
       // Save analysis report
       saveAnalysisReport(analysis, config);
@@ -94,6 +114,64 @@ async function main() {
     console.error('Fatal error:', error);
     process.exit(1);
   }
+}
+
+function parseArgs(args: string[]): CliOptions {
+  const options: CliOptions = {
+    newScanLimit: 100
+  };
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    const next = args[i + 1];
+
+    switch (arg) {
+      case '--scan-more':
+      case '--backfill':
+        options.scanMoreLimit = parsePositiveInteger(arg, next);
+        i++;
+        break;
+      case '--new-limit':
+        options.newScanLimit = parsePositiveInteger(arg, next);
+        i++;
+        break;
+      case '--help':
+      case '-h':
+        printUsage();
+        process.exit(0);
+      default:
+        throw new Error(`Unknown argument: ${arg}`);
+    }
+  }
+
+  return options;
+}
+
+function parsePositiveInteger(flag: string, value: string | undefined): number {
+  if (!value || value.startsWith('--')) {
+    throw new Error(`${flag} requires a number`);
+  }
+
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`${flag} must be a positive integer`);
+  }
+
+  return parsed;
+}
+
+function printUsage(): void {
+  console.log(`
+Usage:
+  npm run dev
+  npm run dev -- --scan-more 500
+  npm run dev -- --backfill 1000
+
+Options:
+  --scan-more <count>  Scan the most recent count inbox emails and merge any new history.
+  --backfill <count>   Alias for --scan-more.
+  --new-limit <count>  Limit for the normal new-mail scan. Default: 100.
+`);
 }
 
 function mergeEmails(storedEmails: Email[], newEmails: Email[]) {
@@ -174,61 +252,57 @@ async function saveSenderDatabase(emails: Email[]) {
   }
 }
 
-function displayResults(analysis: any, logger: Logger) {
-  logger.info('='.repeat(60));
-  logger.info('EMAIL ANALYSIS RESULTS');
-  logger.info('='.repeat(60));
+function displayResults(analysis: SubAgentAnalysis) {
+  const deleteCount = analysis.recommendedActions.delete.length;
+  const unsubscribeCount = analysis.recommendedActions.unsubscribe.length;
+  const reviewCount = analysis.recommendedActions.review.length;
+  const keepCount = analysis.recommendedActions.keep.length;
 
-  logger.info(`\nTotal Emails Analyzed: ${analysis.totalEmailsScanned}`);
-  logger.info(`Total Senders Analyzed: ${analysis.analyses.length}`);
-  logger.info(`Analysis Timestamp: ${analysis.timestamp}`);
-  logger.info(`\n${analysis.summary}`);
+  printTitle(
+    'Email Analysis Results',
+    'Every stored sender was checked and categorized.'
+  );
 
-  logger.info('\n--- RECOMMENDED FOR DELETION ---');
-  if (analysis.recommendedActions.delete.length > 0) {
-    analysis.recommendedActions.delete.forEach((sender: string) => {
-      const detail = analysis.analyses.find((a: any) => a.sender === sender);
-      logger.info(`  • ${sender} (Confidence: ${(detail?.confidence * 100).toFixed(1)}%)`);
-      logger.info(`    Reason: ${detail?.reason}`);
-    });
-  } else {
-    logger.info('  None');
-  }
+  printKeyValues([
+    { label: 'Emails analyzed', value: analysis.totalEmailsScanned },
+    { label: 'Senders analyzed', value: analysis.analyses.length },
+    { label: 'Delete', value: deleteCount, color: deleteCount > 0 ? 'red' : 'gray' },
+    { label: 'Unsubscribe', value: unsubscribeCount, color: unsubscribeCount > 0 ? 'cyan' : 'gray' },
+    { label: 'Review', value: reviewCount, color: reviewCount > 0 ? 'yellow' : 'gray' },
+    { label: 'Keep', value: keepCount, color: 'green' },
+    { label: 'Timestamp', value: formatDateTime(analysis.timestamp) }
+  ]);
 
-  logger.info('\n--- RECOMMENDED FOR UNSUBSCRIPTION ---');
-  if (analysis.recommendedActions.unsubscribe.length > 0) {
-    analysis.recommendedActions.unsubscribe.forEach((sender: string) => {
-      const detail = analysis.analyses.find((a: any) => a.sender === sender);
-      logger.info(`  • ${sender} (Confidence: ${(detail?.confidence * 100).toFixed(1)}%)`);
-      logger.info(`    Reason: ${detail?.reason}`);
-    });
-  } else {
-    logger.info('  None');
-  }
+  console.log('');
+  console.log(color(analysis.summary, 'gray'));
 
-  logger.info('\n--- RECOMMENDED FOR REVIEW ---');
-  if (analysis.recommendedActions.review.length > 0) {
-    analysis.recommendedActions.review.forEach((sender: string) => {
-      const detail = analysis.analyses.find((a: any) => a.sender === sender);
-      logger.info(`  • ${sender} (Confidence: ${(detail?.confidence * 100).toFixed(1)}%)`);
-      logger.info(`    Reason: ${detail?.reason}`);
-    });
-  } else {
-    logger.info('  None');
-  }
+  printRecommendationTable('Recommended For Deletion', getAnalysesForSenders(analysis, analysis.recommendedActions.delete));
+  printRecommendationTable('Recommended For Unsubscription', getAnalysesForSenders(analysis, analysis.recommendedActions.unsubscribe));
+  printRecommendationTable('Needs Review', getAnalysesForSenders(analysis, analysis.recommendedActions.review));
+  printRecommendationTable('Recommended To Keep', getAnalysesForSenders(analysis, analysis.recommendedActions.keep));
+}
 
-  logger.info('\n--- RECOMMENDED TO KEEP ---');
-  if (analysis.recommendedActions.keep.length > 0) {
-    analysis.recommendedActions.keep.forEach((sender: string) => {
-      const detail = analysis.analyses.find((a: any) => a.sender === sender);
-      logger.info(`  • ${sender} (Confidence: ${(detail?.confidence * 100).toFixed(1)}%)`);
-      logger.info(`    Reason: ${detail?.reason}`);
-    });
-  } else {
-    logger.info('  None');
-  }
+function printRecommendationTable(title: string, rows: EmailAnalysis[]) {
+  printSection(`${title} (${rows.length})`);
+  printTable(
+    rows,
+    [
+      { header: 'Sender', width: 32, get: row => row.sender },
+      { header: 'Emails', width: 6, get: row => row.totalEmails },
+      { header: 'Unread', width: 6, get: row => row.unreadCount },
+      { header: 'Read', width: 8, get: row => formatPercent(row.readRate) },
+      { header: 'Conf', width: 7, get: row => formatPercent(row.confidence * 100) },
+      { header: 'Reason', width: 70, get: row => row.reason }
+    ],
+    'No senders in this category.'
+  );
+}
 
-  logger.info('\n' + '='.repeat(60));
+function getAnalysesForSenders(analysis: SubAgentAnalysis, senders: string[]): EmailAnalysis[] {
+  return senders
+    .map(sender => analysis.analyses.find(item => item.sender === sender))
+    .filter((item): item is EmailAnalysis => Boolean(item))
+    .sort((a, b) => b.confidence - a.confidence || b.totalEmails - a.totalEmails);
 }
 
 function saveAnalysisReport(analysis: any, config: any) {

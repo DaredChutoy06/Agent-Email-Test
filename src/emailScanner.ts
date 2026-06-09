@@ -2,7 +2,7 @@ import Imap from 'imap';
 import { simpleParser } from 'mailparser';
 import fs from 'fs';
 import path from 'path';
-import { Email, iCloudConfig, EmailStorage } from './types';
+import { Email, iCloudConfig, EmailStorage, UnsubscribeLink, UnsubscribeMetadata } from './types';
 
 export class EmailScanner {
   private imap: Imap;
@@ -137,6 +137,7 @@ export class EmailScanner {
                 folder: 'INBOX',
                 uid: attributes?.uid,
                 messageId: parsed.messageId || undefined,
+                unsubscribe: this.extractUnsubscribeMetadata(parsed),
                 sender: this.parseSender(parsed.from?.text || '')
               };
 
@@ -182,6 +183,100 @@ export class EmailScanner {
     const name = fromString.replace(/<.+?>/, '').trim() || email;
 
     return { name, email };
+  }
+
+  private extractUnsubscribeMetadata(parsed: any): UnsubscribeMetadata | undefined {
+    const rawHeader = this.getHeaderText(parsed.headers?.get('list-unsubscribe'));
+    const postHeader = this.getHeaderText(parsed.headers?.get('list-unsubscribe-post'));
+    const oneClick = /list-unsubscribe\s*=\s*one-click/i.test(postHeader || '');
+    const links = [
+      ...this.parseListUnsubscribeHeader(rawHeader, oneClick),
+      ...this.extractBodyUnsubscribeLinks(parsed.text || '', parsed.html || '')
+    ];
+    const dedupedLinks = this.dedupeUnsubscribeLinks(links);
+
+    if (!rawHeader && !postHeader && dedupedLinks.length === 0) {
+      return undefined;
+    }
+
+    return {
+      rawHeader,
+      postHeader,
+      oneClick,
+      links: dedupedLinks
+    };
+  }
+
+  private getHeaderText(value: any): string | undefined {
+    if (!value) return undefined;
+    if (Array.isArray(value)) return value.map(item => this.getHeaderText(item)).filter(Boolean).join(', ');
+    if (typeof value === 'string') return value;
+    if (typeof value.value === 'string') return value.value;
+    if (Array.isArray(value.value)) return value.value.join(', ');
+    return String(value);
+  }
+
+  private parseListUnsubscribeHeader(rawHeader: string | undefined, oneClick: boolean): UnsubscribeLink[] {
+    if (!rawHeader) return [];
+
+    const bracketedValues = Array.from(rawHeader.matchAll(/<([^>]+)>/g), match => match[1]);
+    const values = bracketedValues.length > 0
+      ? bracketedValues
+      : rawHeader.split(',').map(value => value.trim());
+
+    return values
+      .map(value => value.trim())
+      .filter(Boolean)
+      .map(value => this.toUnsubscribeLink(value, 'list-unsubscribe', oneClick))
+      .filter((link): link is UnsubscribeLink => Boolean(link));
+  }
+
+  private extractBodyUnsubscribeLinks(text: string, html: string): UnsubscribeLink[] {
+    const body = `${text}\n${html}`.replace(/&amp;/g, '&');
+    const matches = body.match(/https?:\/\/[^\s"'<>]+/gi) || [];
+    const unsubscribePattern = /(unsubscribe|opt-?out|email-preferences|manage-subscription|subscription-preferences)/i;
+
+    return matches
+      .map(url => url.replace(/[)\].,;]+$/, ''))
+      .filter(url => unsubscribePattern.test(url))
+      .slice(0, 10)
+      .map(url => this.toUnsubscribeLink(url, 'body', false))
+      .filter((link): link is UnsubscribeLink => Boolean(link));
+  }
+
+  private toUnsubscribeLink(value: string, source: UnsubscribeLink['source'], oneClick: boolean): UnsubscribeLink | undefined {
+    const normalizedValue = value.trim();
+    if (/^https?:\/\//i.test(normalizedValue)) {
+      return {
+        kind: 'http',
+        value: normalizedValue,
+        source,
+        oneClick: source === 'list-unsubscribe' && oneClick
+      };
+    }
+
+    if (/^mailto:/i.test(normalizedValue)) {
+      return {
+        kind: 'mailto',
+        value: normalizedValue,
+        source,
+        oneClick: false
+      };
+    }
+
+    return undefined;
+  }
+
+  private dedupeUnsubscribeLinks(links: UnsubscribeLink[]): UnsubscribeLink[] {
+    const seen = new Set<string>();
+    return links.filter(link => {
+      const key = `${link.kind}:${link.value}`;
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
   }
 
   private formatImapDate(date: Date): string {

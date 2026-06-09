@@ -11,10 +11,25 @@ export interface Email {
   folder: string;
   uid?: number;
   messageId?: string;
+  unsubscribe?: UnsubscribeMetadata;
   sender?: {
     name: string;
     email: string;
   };
+}
+
+export interface UnsubscribeLink {
+  kind: 'http' | 'mailto';
+  value: string;
+  source: 'list-unsubscribe' | 'body';
+  oneClick: boolean;
+}
+
+export interface UnsubscribeMetadata {
+  rawHeader?: string;
+  postHeader?: string;
+  oneClick: boolean;
+  links: UnsubscribeLink[];
 }
 
 // Email analysis result

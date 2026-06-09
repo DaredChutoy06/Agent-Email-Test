@@ -85,7 +85,7 @@ Key settings in `.env`:
 - **ANTHROPIC_API_KEY**: Your Anthropic API key
 - **SCAN_INTERVAL_MINUTES**: How often to scan (default: 60)
 - **ENABLE_AUTO_DELETE**: Automatically delete recommended emails
-- **ENABLE_AUTO_UNSUBSCRIBE**: Automatically unsubscribe (not implemented yet)
+- **ENABLE_AUTO_UNSUBSCRIBE**: Reserved for future fully automated unsubscribe actions
 - **DELETE_CONFIDENCE_THRESHOLD**: Confidence level to trigger deletion (default: 0.9)
 - **UNSUBSCRIBE_CONFIDENCE_THRESHOLD**: Confidence level to trigger unsubscription (default: 0.85)
 
@@ -115,6 +115,20 @@ Or after building:
 npm start
 ```
 
+### Scan more email history
+
+Normal runs only scan for new mail since the last stored UID. To pull in more historical inbox messages, run a backfill scan:
+
+```bash
+npm run dev -- --scan-more 500
+```
+
+This scans the most recent 500 inbox messages, merges anything not already in `data/emails.json`, then analyzes the full stored set. `--backfill` is an alias:
+
+```bash
+npm run dev -- --backfill 1000
+```
+
 ### Direct email scanning
 ```bash
 npm run scan
@@ -124,6 +138,39 @@ npm run scan
 ```bash
 npm run analyze
 ```
+
+### Unsubscribe foundation
+
+The unsubscribe agent is explicit-selection only and defaults to dry-run mode.
+
+```bash
+npm run unsubscribe -- --sender newsletter@example.com
+npm run unsubscribe -- --selected selected-unsubscribe.json
+```
+
+Selection files can be an array of sender emails:
+
+```json
+["newsletter@example.com", "marketing@example.com"]
+```
+
+Or an object:
+
+```json
+{
+  "unsubscribe": ["newsletter@example.com"],
+  "messageIds": ["<message-id@example.com>"],
+  "emailIds": ["stored-email-id"]
+}
+```
+
+To actually execute safe one-click `List-Unsubscribe` POST requests:
+
+```bash
+npm run unsubscribe -- --selected selected-unsubscribe.json --execute
+```
+
+The agent only executes RFC-style one-click unsubscribe links. Mailto links, ordinary unsubscribe pages, body links, and protected senders are reported for manual review.
 
 ## Output
 
@@ -278,7 +325,7 @@ Modify `src/subAgent.ts` to add custom analysis:
 ## Limitations
 
 - **IMAP only**: Works with iCloud Mail via IMAP protocol
-- **No auto-actions yet**: Currently only provides recommendations (auto-delete/unsubscribe are placeholders)
+- **No broad auto-actions yet**: Recommendations are report-only by default; the unsubscribe agent requires explicit sender selection and only executes one-click unsubscribe links when run with `--execute`
 - **Batch processing**: Scans on demand, not real-time
 - **Storage**: Depends on local JSON file for email history
 
